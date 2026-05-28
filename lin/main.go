@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -32,8 +33,9 @@ func main() {
 	downloadFormat := FormatAudioMP3
 	outputDir := ""
 	filenameTemplate := "%(title)s.%(ext)s"
+	maxConcurrent := 2
 
-	manager := NewDownloadManager(2, nil)
+	manager := NewDownloadManager(maxConcurrent, nil)
 
 	statusLabel := widget.NewLabel("Ready")
 	statusLabel.Alignment = fyne.TextAlignLeading
@@ -63,6 +65,42 @@ func main() {
 	if stateErr != nil {
 		statusLabel.SetText("State store disabled: " + stateErr.Error())
 	}
+	var restoredState PersistedState
+	if stateStore != nil {
+		state, err := stateStore.Load()
+		if err != nil {
+			statusLabel.SetText("Failed to load state: " + err.Error())
+		} else {
+			restoredState = state
+			if state.Settings.DownloadFormat != "" {
+				downloadFormat = state.Settings.DownloadFormat
+			}
+			if state.Settings.OutputDir != "" {
+				outputDir = state.Settings.OutputDir
+			}
+			if state.Settings.FilenameTemplate != "" {
+				filenameTemplate = state.Settings.FilenameTemplate
+			}
+			if state.Settings.MaxConcurrent > 0 {
+				maxConcurrent = state.Settings.MaxConcurrent
+				manager.SetMaxConcurrent(maxConcurrent)
+			}
+		}
+	}
+
+	currentSettings := func() PersistedSettings {
+		return PersistedSettings{
+			DownloadFormat:   downloadFormat,
+			OutputDir:        outputDir,
+			FilenameTemplate: filenameTemplate,
+			MaxConcurrent:    maxConcurrent,
+		}
+	}
+	saveState := func() {
+		if stateStore != nil {
+			stateStore.Schedule(manager.SnapshotState(currentSettings()))
+		}
+	}
 
 	buildRequest := func(url, title string) DownloadRequest {
 		return DownloadRequest{
@@ -72,6 +110,21 @@ func main() {
 			OutputDir:        outputDir,
 			FilenameTemplate: filenameTemplate,
 		}
+	}
+
+	buildPlaylistRequest := func(url, title, playlistTitle, baseOutputDir string, format DownloadFormat, template string) DownloadRequest {
+		req := DownloadRequest{
+			URL:              url,
+			Title:            title,
+			Format:           format,
+			OutputDir:        baseOutputDir,
+			FilenameTemplate: template,
+			PlaylistTitle:    playlistTitle,
+		}
+		if playlistTitle != "" {
+			req.OutputDir = filepath.Join(baseOutputDir, playlistFolderName(playlistTitle))
+		}
+		return req
 	}
 
 	isSupportedURL := func(raw string) bool {
@@ -142,6 +195,47 @@ func main() {
 		return "Video"
 	}
 
+	queueVideo := func(vid Video) {
+		if !vid.IsPlaylist {
+			manager.Add(buildRequest(vid.URL, vid.Title))
+			statusLabel.SetText("Queued: " + vid.Title)
+			return
+		}
+
+		playlistTitle := vid.Title
+		if strings.TrimSpace(playlistTitle) == "" {
+			playlistTitle = "Playlist"
+		}
+		baseOutputDir := outputDir
+		format := downloadFormat
+		template := filenameTemplate
+		statusLabel.SetText("Fetching playlist: " + playlistTitle)
+
+		go func() {
+			fetchedTitle, entries, err := FetchPlaylistInfo(vid.URL, 0)
+			runOnMain(func() {
+				if err != nil {
+					statusLabel.SetText("Playlist error: " + err.Error())
+					return
+				}
+				if len(entries) == 0 {
+					statusLabel.SetText("Playlist has no downloadable entries")
+					return
+				}
+				if strings.TrimSpace(fetchedTitle) != "" && playlistTitle == "Playlist" {
+					playlistTitle = fetchedTitle
+				}
+				for _, entry := range entries {
+					if entry.URL == "" {
+						continue
+					}
+					manager.Add(buildPlaylistRequest(entry.URL, entry.Title, playlistTitle, baseOutputDir, format, template))
+				}
+				statusLabel.SetText(fmt.Sprintf("Queued %d playlist tracks: %s", len(entries), playlistTitle))
+			})
+		}()
+	}
+
 	detailThumb := canvas.NewImageFromResource(theme.MediaPhotoIcon())
 	detailThumb.FillMode = canvas.ImageFillCover
 	detailThumb.ScaleMode = canvas.ImageScaleSmooth
@@ -201,8 +295,7 @@ func main() {
 		detailQueueBtn.Enable()
 
 		detailQueueBtn.OnTapped = func() {
-			manager.Add(buildRequest(vid.URL, vid.Title))
-			statusLabel.SetText("Queued: " + vid.Title)
+			queueVideo(vid)
 		}
 		detailRefreshBtn.OnTapped = func() {
 			detailStatus.SetText("Refreshing preview...")
@@ -301,8 +394,7 @@ func main() {
 			subtitle.SetText(formatResultSubtitle(vid))
 			meta.SetText(formatResultMeta(vid))
 			addBtn.OnTapped = func() {
-				manager.Add(buildRequest(vid.URL, vid.Title))
-				statusLabel.SetText("Queued: " + vid.Title)
+				queueVideo(vid)
 			}
 
 			thumbWrap := row.Objects[0].(*fyne.Container)
@@ -409,8 +501,12 @@ func main() {
 			dialog.ShowError(fmt.Errorf("enter a valid http or https URL"), w)
 			return
 		}
-		manager.Add(buildRequest(link, link))
-		statusLabel.SetText("Queued: " + link)
+		if hasPlaylistURL(link) {
+			queueVideo(Video{URL: link, Title: "Playlist", IsPlaylist: true})
+		} else {
+			manager.Add(buildRequest(link, link))
+			statusLabel.SetText("Queued: " + link)
+		}
 		urlEntry.SetText("")
 	})
 	urlAddBtn.Importance = widget.HighImportance
@@ -611,6 +707,7 @@ func main() {
 		if selectedInfo != nil {
 			detailSize.SetText("Estimated size: " + EstimateSize(selectedInfo, downloadFormat))
 		}
+		saveState()
 	})
 	formatSelect.SetSelected(string(downloadFormat))
 
@@ -618,9 +715,14 @@ func main() {
 	templateEntry.SetText(filenameTemplate)
 	templateEntry.OnChanged = func(value string) {
 		filenameTemplate = value
+		saveState()
 	}
 
-	outputLabel := widget.NewLabel("Default folder: current directory")
+	outputText := "Default folder: current directory"
+	if outputDir != "" {
+		outputText = "Folder: " + outputDir
+	}
+	outputLabel := widget.NewLabel(outputText)
 	outputBtn := widget.NewButtonWithIcon("Choose Folder", theme.FolderOpenIcon(), func() {
 		dialog.ShowFolderOpen(func(uri fyne.ListableURI, err error) {
 			if err != nil || uri == nil {
@@ -628,6 +730,7 @@ func main() {
 			}
 			outputDir = uri.Path()
 			outputLabel.SetText("Folder: " + outputDir)
+			saveState()
 		}, w)
 	})
 
@@ -636,9 +739,11 @@ func main() {
 		if err != nil {
 			return
 		}
+		maxConcurrent = next
 		manager.SetMaxConcurrent(next)
+		saveState()
 	})
-	concurrencySelect.SetSelected("2")
+	concurrencySelect.SetSelected(strconv.Itoa(maxConcurrent))
 
 	settingsContent := container.NewVBox(
 		widget.NewLabelWithStyle("Download Preferences", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -726,9 +831,7 @@ func main() {
 	main := container.NewMax(NewAppBackground(), container.NewPadded(content))
 
 	manager.SetOnChange(func() {
-		if stateStore != nil {
-			stateStore.Schedule(manager.SnapshotState())
-		}
+		saveState()
 		runOnMain(func() {
 			queueItems = manager.QueueSnapshot()
 			activeItems = manager.ActiveSnapshot()
@@ -765,13 +868,8 @@ func main() {
 	})
 
 	if stateStore != nil {
-		state, err := stateStore.Load()
-		if err != nil {
-			statusLabel.SetText("Failed to load state: " + err.Error())
-		} else {
-			manager.RestoreState(state)
-			manager.maybeStart()
-		}
+		manager.RestoreState(restoredState)
+		manager.maybeStart()
 	}
 
 	w.SetContent(main)

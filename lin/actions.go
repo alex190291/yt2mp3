@@ -20,11 +20,11 @@ func OpenInFileManager(path string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", target)
+		cmd = configureCommand(exec.Command("open", target))
 	case "windows":
-		cmd = exec.Command("explorer", target)
+		cmd = configureCommand(exec.Command("explorer", target))
 	default:
-		cmd = exec.Command("xdg-open", target)
+		cmd = configureCommand(exec.Command("xdg-open", target))
 	}
 	return cmd.Start()
 }

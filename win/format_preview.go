@@ -38,7 +38,7 @@ type FormatPreview struct {
 }
 
 func FetchVideoInfo(videoURL string) (*VideoInfo, error) {
-	cmd := exec.Command(getYtDlpPath(), videoURL, "--dump-json", "--no-warnings")
+	cmd := configureCommand(exec.Command(getYtDlpPath(), videoURL, "--dump-json", "--no-warnings"))
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err

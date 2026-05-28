@@ -38,7 +38,7 @@ func getLocalYtDlpVersion() (string, error) {
 		return "", nil // Not installed
 	}
 
-	cmd := exec.Command(path, "--version")
+	cmd := configureCommand(exec.Command(path, "--version"))
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err

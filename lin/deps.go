@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	ytDlpBinary = "yt-dlp"
+	ytDlpBinary  = "yt-dlp"
 	ffmpegBinary = "ffmpeg"
-	binDir      = "bin"
+	binDir       = "bin"
 )
 
 type ReleaseInfo struct {
@@ -37,8 +37,8 @@ func getLocalYtDlpVersion() (string, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return "", nil // Not installed
 	}
-	
-	cmd := exec.Command(path, "--version")
+
+	cmd := configureCommand(exec.Command(path, "--version"))
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -74,7 +74,7 @@ func getRemoteYtDlpVersion() (string, string, error) {
 			break
 		}
 	}
-	
+
 	// Fallback if specific asset not found (sometimes they change naming)
 	if downloadURL == "" {
 		for _, asset := range release.Assets {
@@ -113,7 +113,7 @@ func downloadFile(url string, destPath string, onProgress func(float64)) error {
 	defer out.Close()
 
 	size := resp.ContentLength
-	
+
 	// Create a wrapper to track progress
 	counter := &WriteCounter{
 		Total:      float64(size),
@@ -123,7 +123,7 @@ func downloadFile(url string, destPath string, onProgress func(float64)) error {
 	if _, err = io.Copy(out, io.TeeReader(resp.Body, counter)); err != nil {
 		return err
 	}
-	
+
 	return nil
 }
 

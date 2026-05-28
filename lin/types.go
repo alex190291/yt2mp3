@@ -14,13 +14,13 @@ type Video struct {
 	IsPlaylist    bool   `json:"-"`
 }
 
-func (v Video) FilterValue() string { return v.Title }
-func (v Video) TitleString() string { return v.Title }
+func (v Video) FilterValue() string       { return v.Title }
+func (v Video) TitleString() string       { return v.Title }
 func (v Video) DescriptionString() string { return v.Uploader + " • " + v.Duration }
 
 type Playlist struct {
-	ID    string
-	Title string
+	ID     string
+	Title  string
 	Videos []Video
 }
 

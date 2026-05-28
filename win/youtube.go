@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -43,7 +44,7 @@ func SearchYouTubePlaylists(query string, limit int) ([]Video, error) {
 func searchYouTube(query string, limit int, prefix string) ([]Video, error) {
 	// yt-dlp "<prefix><limit>:<query>" --flat-playlist --dump-json
 	searchQuery := fmt.Sprintf("%s%d:%s", prefix, limit, query)
-	cmd := exec.Command(getYtDlpPath(), searchQuery, "--flat-playlist", "--dump-json", "--no-warnings")
+	cmd := configureCommand(exec.Command(getYtDlpPath(), searchQuery, "--flat-playlist", "--dump-json", "--no-warnings"))
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -53,37 +54,80 @@ func searchYouTube(query string, limit int, prefix string) ([]Video, error) {
 	return parseYtDlpJSON(output)
 }
 
-// FetchPlaylist fetches videos from a playlist URL
+// FetchPlaylist fetches videos from a playlist URL.
 func FetchPlaylist(url string, limit int) ([]Video, error) {
+	_, videos, err := FetchPlaylistInfo(url, limit)
+	return videos, err
+}
+
+func FetchPlaylistInfo(url string, limit int) (string, []Video, error) {
 	args := []string{url, "--flat-playlist", "--dump-json", "--no-warnings"}
 	if limit > 0 {
 		args = append(args, fmt.Sprintf("--playlist-end=%d", limit))
 	}
 
-	cmd := exec.Command(getYtDlpPath(), args...)
+	cmd := configureCommand(exec.Command(getYtDlpPath(), args...))
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 
-	return parseYtDlpJSON(output)
+	title, videos, err := parseYtDlpJSONWithPlaylistTitle(output)
+	if err != nil {
+		return "", nil, err
+	}
+	entries := make([]Video, 0, len(videos))
+	for _, video := range videos {
+		if !video.IsPlaylist {
+			entries = append(entries, video)
+		}
+	}
+	return title, entries, nil
 }
 
 func parseYtDlpJSON(data []byte) ([]Video, error) {
+	_, videos, err := parseYtDlpJSONWithPlaylistTitle(data)
+	return videos, err
+}
+
+func parseYtDlpJSONWithPlaylistTitle(data []byte) (string, []Video, error) {
 	var videos []Video
+	playlistTitle := ""
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		var playlist struct {
+			Type    string  `json:"_type"`
+			Title   string  `json:"title"`
+			Entries []Video `json:"entries"`
+		}
+		if err := json.Unmarshal(line, &playlist); err == nil && len(playlist.Entries) > 0 {
+			if playlistTitle == "" {
+				playlistTitle = playlist.Title
+			}
+			for _, entry := range playlist.Entries {
+				normalizeSearchResult(&entry)
+				entry.IsPlaylist = isPlaylistResult(entry)
+				if !entry.IsPlaylist {
+					videos = append(videos, entry)
+				}
+			}
+			continue
+		}
+
 		var v Video
 		if err := json.Unmarshal(line, &v); err == nil {
 			normalizeSearchResult(&v)
 			v.IsPlaylist = isPlaylistResult(v)
+			if v.IsPlaylist && playlistTitle == "" {
+				playlistTitle = v.Title
+			}
 			videos = append(videos, v)
 		}
 	}
 
-	return videos, scanner.Err()
+	return playlistTitle, videos, scanner.Err()
 }
 
 func searchYouTubePlaylistsURL(query string, limit int) ([]Video, error) {
@@ -93,7 +137,7 @@ func searchYouTubePlaylistsURL(query string, limit int) ([]Video, error) {
 	if limit > 0 {
 		args = append(args, fmt.Sprintf("--playlist-end=%d", limit))
 	}
-	cmd := exec.Command(getYtDlpPath(), args...)
+	cmd := configureCommand(exec.Command(getYtDlpPath(), args...))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
@@ -156,10 +200,11 @@ func hasPlaylistURL(raw string) bool {
 	if raw == "" {
 		return false
 	}
-	if strings.Contains(raw, "playlist?list=") {
+	parsed, err := url.Parse(raw)
+	if err == nil && parsed.Query().Get("list") != "" {
 		return true
 	}
-	if strings.Contains(raw, "list=") && !strings.Contains(raw, "watch?v=") {
+	if strings.Contains(raw, "playlist?list=") {
 		return true
 	}
 	return false
@@ -188,5 +233,23 @@ func Download(ctx context.Context, req DownloadRequest) *exec.Cmd {
 		args = append(args, "--ffmpeg-location", localFFmpeg)
 	}
 
-	return exec.CommandContext(ctx, getYtDlpPath(), args...)
+	return configureCommand(exec.CommandContext(ctx, getYtDlpPath(), args...))
+}
+
+var unsafePathChars = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]+`)
+
+func playlistFolderName(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return "Playlist"
+	}
+	title = unsafePathChars.ReplaceAllString(title, "_")
+	title = strings.Trim(title, ". ")
+	if title == "" {
+		return "Playlist"
+	}
+	if len(title) > 120 {
+		title = strings.TrimSpace(title[:120])
+	}
+	return title
 }

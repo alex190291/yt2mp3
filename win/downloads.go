@@ -28,6 +28,7 @@ type DownloadRequest struct {
 	Format           DownloadFormat
 	OutputDir        string
 	FilenameTemplate string
+	PlaylistTitle    string
 }
 
 type DownloadStatus string

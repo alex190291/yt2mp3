@@ -10,9 +10,17 @@ import (
 )
 
 type PersistedState struct {
-	Queue   []PersistedJob `json:"queue"`
-	History []PersistedJob `json:"history"`
-	SavedAt time.Time      `json:"saved_at"`
+	Queue    []PersistedJob    `json:"queue"`
+	History  []PersistedJob    `json:"history"`
+	Settings PersistedSettings `json:"settings"`
+	SavedAt  time.Time         `json:"saved_at"`
+}
+
+type PersistedSettings struct {
+	DownloadFormat   DownloadFormat `json:"download_format"`
+	OutputDir        string         `json:"output_dir"`
+	FilenameTemplate string         `json:"filename_template"`
+	MaxConcurrent    int            `json:"max_concurrent"`
 }
 
 type PersistedJob struct {
@@ -99,7 +107,7 @@ func (s *StateStore) saveNow(state PersistedState) error {
 	return os.Rename(tmpPath, s.path)
 }
 
-func (m *DownloadManager) SnapshotState() PersistedState {
+func (m *DownloadManager) SnapshotState(settings PersistedSettings) PersistedState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -117,9 +125,10 @@ func (m *DownloadManager) SnapshotState() PersistedState {
 	}
 
 	return PersistedState{
-		Queue:   queueJobs,
-		History: history,
-		SavedAt: time.Now(),
+		Queue:    queueJobs,
+		History:  history,
+		Settings: settings,
+		SavedAt:  time.Now(),
 	}
 }
 
